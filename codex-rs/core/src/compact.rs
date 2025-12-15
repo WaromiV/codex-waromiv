@@ -55,7 +55,7 @@ pub(crate) async fn run_compact_task(
     input: Vec<UserInput>,
 ) {
     let start_event = EventMsg::TaskStarted(TaskStartedEvent {
-        model_context_window: turn_context.client.get_model_context_window(),
+        model_context_window: turn_context.client().get_model_context_window(),
     });
     sess.send_event(&turn_context, start_event).await;
     run_compact_task_inner(sess.clone(), turn_context, input).await;
@@ -71,21 +71,21 @@ async fn run_compact_task_inner(
     let mut history = sess.clone_history().await;
     history.record_items(
         &[initial_input_for_turn.into()],
-        turn_context.truncation_policy,
+        turn_context.truncation_policy(),
     );
 
     let mut truncated_count = 0usize;
 
-    let max_retries = turn_context.client.get_provider().stream_max_retries();
+    let max_retries = turn_context.client().get_provider().stream_max_retries();
     let mut retries = 0;
 
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
-        cwd: turn_context.cwd.clone(),
-        approval_policy: turn_context.approval_policy,
-        sandbox_policy: turn_context.sandbox_policy.clone(),
-        model: turn_context.client.get_model(),
-        effort: turn_context.client.get_reasoning_effort(),
-        summary: turn_context.client.get_reasoning_summary(),
+        cwd: turn_context.cwd(),
+        approval_policy: turn_context.approval_policy(),
+        sandbox_policy: turn_context.sandbox_policy(),
+        model: turn_context.client().get_model(),
+        effort: turn_context.client().get_reasoning_effort(),
+        summary: turn_context.client().get_reasoning_summary(),
     });
     sess.persist_rollout_items(&[rollout_item]).await;
 
@@ -290,7 +290,7 @@ async fn drain_to_completed(
     turn_context: &TurnContext,
     prompt: &Prompt,
 ) -> CodexResult<()> {
-    let mut stream = turn_context.client.clone().stream(prompt).await?;
+    let mut stream = turn_context.client().stream(prompt).await?;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {

@@ -39,12 +39,10 @@ pub(crate) async fn apply_patch(
     call_id: &str,
     action: ApplyPatchAction,
 ) -> InternalApplyPatchInvocation {
-    match assess_patch_safety(
-        &action,
-        turn_context.approval_policy,
-        &turn_context.sandbox_policy,
-        &turn_context.cwd,
-    ) {
+    let approval_policy = turn_context.approval_policy();
+    let sandbox_policy = turn_context.sandbox_policy();
+    let cwd = turn_context.cwd();
+    match assess_patch_safety(&action, approval_policy, &sandbox_policy, &cwd) {
         SafetyCheck::AutoApprove {
             user_explicitly_approved,
             ..

@@ -72,7 +72,7 @@ impl SessionTask for GhostSnapshotTask {
             let cancelled = tokio::select! {
                 _ = cancellation_token.cancelled() => true,
                 _ = async {
-                    let repo_path = ctx_for_task.cwd.clone();
+                    let repo_path = ctx_for_task.cwd();
                     // First, compute a snapshot report so we can warn about
                     // large untracked directories before running the heavier
                     // snapshot logic.

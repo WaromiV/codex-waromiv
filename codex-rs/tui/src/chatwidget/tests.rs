@@ -2065,8 +2065,8 @@ fn disabled_slash_command_while_task_running_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None);
     chat.bottom_pane.set_task_running(true);
 
-    // Dispatch a command that is unavailable while a task runs (e.g., /model)
-    chat.dispatch_command(SlashCommand::Model);
+    // Dispatch a command that is unavailable while a task runs (e.g., /new)
+    chat.dispatch_command(SlashCommand::New);
 
     // Drain history and snapshot the rendered error line(s)
     let cells = drain_insert_history(&mut rx);
@@ -2076,6 +2076,46 @@ fn disabled_slash_command_while_task_running_snapshot() {
     );
     let blob = lines_to_single_string(cells.last().unwrap());
     assert_snapshot!(blob);
+}
+
+#[test]
+fn model_command_allowed_during_task_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5-codex"));
+    chat.bottom_pane.set_task_running(true);
+
+    chat.dispatch_command(SlashCommand::Model);
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.is_empty(),
+        "expected no error message when running /model during a task"
+    );
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert_snapshot!("model_selection_popup_during_task", popup);
+}
+
+#[test]
+fn approvals_command_allowed_during_task_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None);
+    chat.bottom_pane.set_task_running(true);
+
+    chat.config.notices.hide_full_access_warning = None;
+    chat.dispatch_command(SlashCommand::Approvals);
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.is_empty(),
+        "expected no error message when running /approvals during a task"
+    );
+
+    let popup = render_bottom_popup(&chat, 80);
+    #[cfg(target_os = "windows")]
+    insta::with_settings!({ snapshot_suffix => "windows" }, {
+        assert_snapshot!("approvals_selection_popup_during_task", popup);
+    });
+    #[cfg(not(target_os = "windows"))]
+    assert_snapshot!("approvals_selection_popup_during_task", popup);
 }
 
 //

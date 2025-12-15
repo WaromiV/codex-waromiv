@@ -72,8 +72,6 @@ impl SlashCommand {
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Undo
-            | SlashCommand::Model
-            | SlashCommand::Approvals
             | SlashCommand::Review
             | SlashCommand::Logout => false,
             SlashCommand::Diff
@@ -84,6 +82,8 @@ impl SlashCommand {
             | SlashCommand::Feedback
             | SlashCommand::Quit
             | SlashCommand::Exit => true,
+            SlashCommand::Model => true,
+            SlashCommand::Approvals => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
         }

@@ -120,7 +120,7 @@ impl UnifiedExecSessionManager {
         let cwd = request
             .workdir
             .clone()
-            .unwrap_or_else(|| context.turn.cwd.clone());
+            .unwrap_or_else(|| context.turn.cwd());
 
         let session = self
             .open_session_with_sandbox(
@@ -482,14 +482,16 @@ impl UnifiedExecSessionManager {
     ) -> Result<UnifiedExecSession, UnifiedExecError> {
         let env = apply_unified_exec_env(create_env(&context.turn.shell_environment_policy));
         let features = context.session.features();
+        let approval_policy = context.turn.approval_policy();
+        let sandbox_policy = context.turn.sandbox_policy();
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
         let exec_approval_requirement = create_exec_approval_requirement_for_command(
             &context.turn.exec_policy,
             &features,
             command,
-            context.turn.approval_policy,
-            &context.turn.sandbox_policy,
+            approval_policy,
+            &sandbox_policy,
             sandbox_permissions,
         )
         .await;
@@ -513,7 +515,7 @@ impl UnifiedExecSessionManager {
                 &req,
                 &tool_ctx,
                 context.turn.as_ref(),
-                context.turn.approval_policy,
+                approval_policy,
             )
             .await
             .map_err(|e| UnifiedExecError::create_session(format!("{e:?}")))

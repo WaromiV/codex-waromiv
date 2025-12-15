@@ -36,7 +36,7 @@ fn format_user_shell_command_body(
     sections.push("Output:".to_string());
     sections.push(format_exec_output_str(
         exec_output,
-        turn_context.truncation_policy,
+        turn_context.truncation_policy(),
     ));
     sections.push("</result>".to_string());
     sections.join("\n")

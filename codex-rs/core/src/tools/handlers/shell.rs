@@ -210,18 +210,20 @@ impl ShellHandler {
         call_id: String,
         freeform: bool,
     ) -> Result<ToolOutput, FunctionCallError> {
+        let approval_policy = turn.approval_policy();
+        let sandbox_policy = turn.sandbox_policy();
         // Approval policy guard for explicit escalation in non-OnRequest modes.
         if exec_params
             .sandbox_permissions
             .requires_escalated_permissions()
             && !matches!(
-                turn.approval_policy,
+                approval_policy,
                 codex_protocol::protocol::AskForApproval::OnRequest
             )
         {
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
-                policy = turn.approval_policy
+                policy = approval_policy
             )));
         }
 
@@ -256,8 +258,8 @@ impl ShellHandler {
             &turn.exec_policy,
             &features,
             &exec_params.command,
-            turn.approval_policy,
-            &turn.sandbox_policy,
+            approval_policy,
+            &sandbox_policy,
             exec_params.sandbox_permissions,
         )
         .await;
@@ -280,7 +282,7 @@ impl ShellHandler {
             tool_name: tool_name.to_string(),
         };
         let out = orchestrator
-            .run(&mut runtime, &req, &tool_ctx, &turn, turn.approval_policy)
+            .run(&mut runtime, &req, &tool_ctx, &turn, approval_policy)
             .await;
         let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
         let content = emitter.finish(event_ctx, out).await?;

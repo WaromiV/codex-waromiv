@@ -84,8 +84,9 @@ impl ToolHandler for GrepFilesHandler {
             }
         });
 
+        let cwd = turn.cwd();
         let search_results =
-            run_rg_search(pattern, include.as_deref(), &search_path, limit, &turn.cwd).await?;
+            run_rg_search(pattern, include.as_deref(), &search_path, limit, &cwd).await?;
 
         if search_results.is_empty() {
             Ok(ToolOutput::Function {

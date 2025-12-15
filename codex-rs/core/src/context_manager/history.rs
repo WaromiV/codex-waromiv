@@ -80,7 +80,7 @@ impl ContextManager {
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
-        let model_family = turn_context.client.get_model_family();
+        let model_family = turn_context.client().get_model_family();
         let base_tokens =
             i64::try_from(approx_token_count(model_family.base_instructions.as_str()))
                 .unwrap_or(i64::MAX);

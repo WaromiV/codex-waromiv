@@ -59,7 +59,7 @@ impl SessionTask for UserShellCommandTask {
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         let event = EventMsg::TaskStarted(TaskStartedEvent {
-            model_context_window: turn_context.client.get_model_context_window(),
+            model_context_window: turn_context.client().get_model_context_window(),
         });
         let session = session.clone_session();
         session.send_event(turn_context.as_ref(), event).await;
@@ -74,7 +74,8 @@ impl SessionTask for UserShellCommandTask {
 
         let call_id = Uuid::new_v4().to_string();
         let raw_command = self.command.clone();
-        let cwd = turn_context.cwd.clone();
+        let cwd = turn_context.cwd();
+        let truncation_policy = turn_context.truncation_policy();
 
         let parsed_cmd = parse_command(&command);
         session
@@ -176,10 +177,7 @@ impl SessionTask for UserShellCommandTask {
                             aggregated_output: output.aggregated_output.text.clone(),
                             exit_code: output.exit_code,
                             duration: output.duration,
-                            formatted_output: format_exec_output_str(
-                                &output,
-                                turn_context.truncation_policy,
-                            ),
+                            formatted_output: format_exec_output_str(&output, truncation_policy),
                         }),
                     )
                     .await;
@@ -223,7 +221,7 @@ impl SessionTask for UserShellCommandTask {
                             duration: exec_output.duration,
                             formatted_output: format_exec_output_str(
                                 &exec_output,
-                                turn_context.truncation_policy,
+                                truncation_policy,
                             ),
                         }),
                     )

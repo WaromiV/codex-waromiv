@@ -128,6 +128,7 @@ impl ToolHandler for UnifiedExecHandler {
                         "failed to parse exec_command arguments: {err:?}"
                     ))
                 })?;
+                let approval_policy = context.turn.approval_policy();
                 let process_id = manager.allocate_process_id().await;
                 let command = get_command(&args, session.user_shell());
 
@@ -142,21 +143,21 @@ impl ToolHandler for UnifiedExecHandler {
 
                 if sandbox_permissions.requires_escalated_permissions()
                     && !matches!(
-                        context.turn.approval_policy,
+                        approval_policy,
                         codex_protocol::protocol::AskForApproval::OnRequest
                     )
                 {
                     manager.release_process_id(&process_id).await;
                     return Err(FunctionCallError::RespondToModel(format!(
                         "approval policy is {policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {policy:?}",
-                        policy = context.turn.approval_policy
+                        policy = approval_policy
                     )));
                 }
 
                 let workdir = workdir.filter(|value| !value.is_empty());
 
                 let workdir = workdir.map(|dir| context.turn.resolve_path(Some(dir)));
-                let cwd = workdir.clone().unwrap_or_else(|| context.turn.cwd.clone());
+                let cwd = workdir.clone().unwrap_or_else(|| context.turn.cwd());
 
                 if let Some(output) = intercept_apply_patch(
                     &command,

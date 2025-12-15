@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -351,37 +352,92 @@ pub(crate) struct Session {
 #[derive(Debug)]
 pub(crate) struct TurnContext {
     pub(crate) sub_id: String,
-    pub(crate) client: ModelClient,
-    /// The session's current working directory. All relative paths provided by
-    /// the model as well as sandbox policies are resolved against this path
-    /// instead of `std::env::current_dir()`.
-    pub(crate) cwd: PathBuf,
+    state: Arc<StdRwLock<TurnContextState>>,
     pub(crate) developer_instructions: Option<String>,
     pub(crate) base_instructions: Option<String>,
     pub(crate) compact_prompt: Option<String>,
     pub(crate) user_instructions: Option<String>,
-    pub(crate) approval_policy: AskForApproval,
-    pub(crate) sandbox_policy: SandboxPolicy,
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
-    pub(crate) tools_config: ToolsConfig,
     pub(crate) final_output_json_schema: Option<Value>,
-    pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) exec_policy: Arc<RwLock<ExecPolicy>>,
-    pub(crate) truncation_policy: TruncationPolicy,
+}
+
+#[derive(Clone, Debug)]
+struct TurnContextState {
+    client: ModelClient,
+    cwd: PathBuf,
+    approval_policy: AskForApproval,
+    sandbox_policy: SandboxPolicy,
+    tools_config: ToolsConfig,
+    codex_linux_sandbox_exe: Option<PathBuf>,
+    truncation_policy: TruncationPolicy,
 }
 
 impl TurnContext {
     pub(crate) fn resolve_path(&self, path: Option<String>) -> PathBuf {
         path.as_ref()
             .map(PathBuf::from)
-            .map_or_else(|| self.cwd.clone(), |p| self.cwd.join(p))
+            .map_or_else(|| self.cwd(), |p| self.cwd().join(p))
     }
 
     pub(crate) fn compact_prompt(&self) -> &str {
         self.compact_prompt
             .as_deref()
             .unwrap_or(compact::SUMMARIZATION_PROMPT)
+    }
+
+    fn state(&self) -> std::sync::RwLockReadGuard<'_, TurnContextState> {
+        self.state.read().expect("turn context state lock poisoned")
+    }
+
+    pub(crate) fn client(&self) -> ModelClient {
+        self.state().client.clone()
+    }
+
+    pub(crate) fn cwd(&self) -> PathBuf {
+        self.state().cwd.clone()
+    }
+
+    pub(crate) fn approval_policy(&self) -> AskForApproval {
+        self.state().approval_policy
+    }
+
+    pub(crate) fn sandbox_policy(&self) -> SandboxPolicy {
+        self.state().sandbox_policy.clone()
+    }
+
+    pub(crate) fn tools_config(&self) -> ToolsConfig {
+        self.state().tools_config.clone()
+    }
+
+    pub(crate) fn codex_linux_sandbox_exe(&self) -> Option<PathBuf> {
+        self.state().codex_linux_sandbox_exe.clone()
+    }
+
+    pub(crate) fn truncation_policy(&self) -> TruncationPolicy {
+        self.state().truncation_policy
+    }
+
+    fn update_state(&self, next: TurnContextState) {
+        *self
+            .state
+            .write()
+            .expect("turn context state lock poisoned") = next;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_approval_policy(&self, approval_policy: AskForApproval) {
+        if let Ok(mut state) = self.state.write() {
+            state.approval_policy = approval_policy;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sandbox_policy(&self, sandbox_policy: SandboxPolicy) {
+        if let Ok(mut state) = self.state.write() {
+            state.sandbox_policy = sandbox_policy;
+        }
     }
 }
 
@@ -473,10 +529,60 @@ impl Session {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
+        per_turn_config.model = Some(session_configuration.model.clone());
+        per_turn_config.cwd = session_configuration.cwd.clone();
+        per_turn_config.approval_policy = session_configuration.approval_policy;
+        per_turn_config.sandbox_policy = session_configuration.sandbox_policy.clone();
         per_turn_config.model_reasoning_effort = session_configuration.model_reasoning_effort;
         per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
         per_turn_config.features = config.features.clone();
         per_turn_config
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_turn_context_state(
+        auth_manager: Option<Arc<AuthManager>>,
+        otel_manager: &OtelManager,
+        provider: &ModelProviderInfo,
+        session_configuration: &SessionConfiguration,
+        per_turn_config: Arc<Config>,
+        model_family: &ModelFamily,
+        conversation_id: ConversationId,
+    ) -> TurnContextState {
+        let otel_manager = otel_manager.clone().with_model(
+            session_configuration.model.as_str(),
+            model_family.get_model_slug(),
+        );
+
+        let client = ModelClient::new(
+            per_turn_config.clone(),
+            auth_manager,
+            model_family.clone(),
+            otel_manager,
+            provider.clone(),
+            session_configuration.model_reasoning_effort,
+            session_configuration.model_reasoning_summary,
+            conversation_id,
+            session_configuration.session_source.clone(),
+        );
+
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family,
+            features: &per_turn_config.features,
+        });
+
+        TurnContextState {
+            client,
+            cwd: session_configuration.cwd.clone(),
+            approval_policy: session_configuration.approval_policy,
+            sandbox_policy: session_configuration.sandbox_policy.clone(),
+            tools_config,
+            codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
+            truncation_policy: TruncationPolicy::new(
+                per_turn_config.as_ref(),
+                model_family.truncation_policy,
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -485,54 +591,32 @@ impl Session {
         otel_manager: &OtelManager,
         provider: ModelProviderInfo,
         session_configuration: &SessionConfiguration,
-        per_turn_config: Config,
+        per_turn_config: Arc<Config>,
         model_family: ModelFamily,
         conversation_id: ConversationId,
         sub_id: String,
     ) -> TurnContext {
-        let otel_manager = otel_manager.clone().with_model(
-            session_configuration.model.as_str(),
-            model_family.get_model_slug(),
-        );
-
-        let per_turn_config = Arc::new(per_turn_config);
-        let client = ModelClient::new(
-            per_turn_config.clone(),
+        let state = Self::build_turn_context_state(
             auth_manager,
-            model_family.clone(),
             otel_manager,
-            provider,
-            session_configuration.model_reasoning_effort,
-            session_configuration.model_reasoning_summary,
+            &provider,
+            session_configuration,
+            Arc::clone(&per_turn_config),
+            &model_family,
             conversation_id,
-            session_configuration.session_source.clone(),
         );
-
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
-            model_family: &model_family,
-            features: &per_turn_config.features,
-        });
 
         TurnContext {
             sub_id,
-            client,
-            cwd: session_configuration.cwd.clone(),
+            state: Arc::new(StdRwLock::new(state)),
             developer_instructions: session_configuration.developer_instructions.clone(),
             base_instructions: session_configuration.base_instructions.clone(),
             compact_prompt: session_configuration.compact_prompt.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
-            approval_policy: session_configuration.approval_policy,
-            sandbox_policy: session_configuration.sandbox_policy.clone(),
             shell_environment_policy: per_turn_config.shell_environment_policy.clone(),
-            tools_config,
             final_output_json_schema: None,
-            codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             exec_policy: session_configuration.exec_policy.clone(),
-            truncation_policy: TruncationPolicy::new(
-                per_turn_config.as_ref(),
-                model_family.truncation_policy,
-            ),
         }
     }
 
@@ -782,7 +866,7 @@ impl Session {
                         }
                     })
                 {
-                    let curr = turn_context.client.get_model();
+                    let curr = turn_context.client().get_model();
                     if prev != curr {
                         warn!(
                             "resuming session with different model: previous={prev}, current={curr}"
@@ -819,9 +903,95 @@ impl Session {
     }
 
     pub(crate) async fn update_settings(&self, updates: SessionSettingsUpdate) {
-        let mut state = self.state.lock().await;
+        let should_refresh_active_turn = Self::settings_update_changes_context(&updates);
+        let (previous_configuration, session_configuration) = {
+            let mut state = self.state.lock().await;
+            let previous_configuration = state.session_configuration.clone();
+            state.session_configuration = state.session_configuration.apply(&updates);
+            (previous_configuration, state.session_configuration.clone())
+        };
+        let per_turn_config = Arc::new(Self::build_per_turn_config(&session_configuration));
 
-        state.session_configuration = state.session_configuration.apply(&updates);
+        if previous_configuration.sandbox_policy != session_configuration.sandbox_policy {
+            self.notify_sandbox_state_change(&session_configuration, Arc::clone(&per_turn_config))
+                .await;
+        }
+        if should_refresh_active_turn {
+            self.refresh_active_turn_contexts(&session_configuration, per_turn_config)
+                .await;
+        }
+    }
+
+    fn settings_update_changes_context(updates: &SessionSettingsUpdate) -> bool {
+        updates.model.is_some()
+            || updates.approval_policy.is_some()
+            || updates.sandbox_policy.is_some()
+            || updates.reasoning_effort.is_some()
+            || updates.reasoning_summary.is_some()
+            || updates.cwd.is_some()
+    }
+
+    async fn notify_sandbox_state_change(
+        &self,
+        session_configuration: &SessionConfiguration,
+        per_turn_config: Arc<Config>,
+    ) {
+        let sandbox_state = SandboxState {
+            sandbox_policy: session_configuration.sandbox_policy.clone(),
+            codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
+            sandbox_cwd: session_configuration.cwd.clone(),
+        };
+        if let Err(e) = self
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .notify_sandbox_state_change(&sandbox_state)
+            .await
+        {
+            warn!("Failed to notify sandbox state change to MCP servers: {e:#}");
+        }
+    }
+
+    async fn refresh_active_turn_contexts(
+        &self,
+        session_configuration: &SessionConfiguration,
+        per_turn_config: Arc<Config>,
+    ) {
+        let contexts: Vec<Arc<TurnContext>> = {
+            let active = self.active_turn.lock().await;
+            match active.as_ref() {
+                Some(active_turn) => active_turn
+                    .tasks
+                    .values()
+                    .map(|task| Arc::clone(&task.turn_context))
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+
+        if contexts.is_empty() {
+            return;
+        }
+
+        let model_family = self
+            .services
+            .models_manager
+            .construct_model_family(session_configuration.model.as_str(), &per_turn_config)
+            .await;
+        let turn_state = Self::build_turn_context_state(
+            Some(Arc::clone(&self.services.auth_manager)),
+            &self.services.otel_manager,
+            &session_configuration.provider,
+            session_configuration,
+            per_turn_config,
+            &model_family,
+            self.conversation_id,
+        );
+
+        for ctx in contexts {
+            ctx.update_state(turn_state.clone());
+        }
     }
 
     pub(crate) async fn new_turn(&self, updates: SessionSettingsUpdate) -> Arc<TurnContext> {
@@ -842,24 +1012,11 @@ impl Session {
             state.session_configuration = session_configuration.clone();
             (session_configuration, sandbox_policy_changed)
         };
-        let per_turn_config = Self::build_per_turn_config(&session_configuration);
+        let per_turn_config = Arc::new(Self::build_per_turn_config(&session_configuration));
 
         if sandbox_policy_changed {
-            let sandbox_state = SandboxState {
-                sandbox_policy: per_turn_config.sandbox_policy.clone(),
-                codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
-                sandbox_cwd: per_turn_config.cwd.clone(),
-            };
-            if let Err(e) = self
-                .services
-                .mcp_connection_manager
-                .read()
-                .await
-                .notify_sandbox_state_change(&sandbox_state)
-                .await
-            {
-                warn!("Failed to notify sandbox state change to MCP servers: {e:#}");
-            }
+            self.notify_sandbox_state_change(&session_configuration, Arc::clone(&per_turn_config))
+                .await;
         }
 
         let model_family = self
@@ -872,7 +1029,7 @@ impl Session {
             &self.services.otel_manager,
             session_configuration.provider.clone(),
             &session_configuration,
-            per_turn_config,
+            Arc::clone(&per_turn_config),
             model_family,
             self.conversation_id,
             sub_id,
@@ -1135,7 +1292,7 @@ impl Session {
                 RolloutItem::ResponseItem(response_item) => {
                     history.record_items(
                         std::iter::once(response_item),
-                        turn_context.truncation_policy,
+                        turn_context.truncation_policy(),
                     );
                 }
                 RolloutItem::Compacted(compacted) => {
@@ -1166,7 +1323,7 @@ impl Session {
         turn_context: &TurnContext,
     ) {
         let mut state = self.state.lock().await;
-        state.record_items(items.iter(), turn_context.truncation_policy);
+        state.record_items(items.iter(), turn_context.truncation_policy());
     }
 
     pub(crate) async fn record_model_warning(&self, message: impl Into<String>, ctx: &TurnContext) {
@@ -1220,6 +1377,7 @@ impl Session {
     pub(crate) fn build_initial_context(&self, turn_context: &TurnContext) -> Vec<ResponseItem> {
         let mut items = Vec::<ResponseItem>::with_capacity(3);
         let shell = self.user_shell();
+        let cwd = turn_context.cwd();
         if let Some(developer_instructions) = turn_context.developer_instructions.as_deref() {
             items.push(DeveloperInstructions::new(developer_instructions.to_string()).into());
         }
@@ -1227,15 +1385,15 @@ impl Session {
             items.push(
                 UserInstructions {
                     text: user_instructions.to_string(),
-                    directory: turn_context.cwd.to_string_lossy().into_owned(),
+                    directory: cwd.to_string_lossy().into_owned(),
                 }
                 .into(),
             );
         }
         items.push(ResponseItem::from(EnvironmentContext::new(
-            Some(turn_context.cwd.clone()),
-            Some(turn_context.approval_policy),
-            Some(turn_context.sandbox_policy.clone()),
+            Some(cwd),
+            Some(turn_context.approval_policy()),
+            Some(turn_context.sandbox_policy()),
             shell.as_ref().clone(),
         )));
         items
@@ -1263,13 +1421,11 @@ impl Session {
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
     ) {
+        let model_context_window = turn_context.client().get_model_context_window();
         {
             let mut state = self.state.lock().await;
             if let Some(token_usage) = token_usage {
-                state.update_token_info_from_usage(
-                    token_usage,
-                    turn_context.client.get_model_context_window(),
-                );
+                state.update_token_info_from_usage(token_usage, model_context_window);
             }
         }
         self.send_token_count_event(turn_context).await;
@@ -1300,7 +1456,7 @@ impl Session {
             };
 
             if info.model_context_window.is_none() {
-                info.model_context_window = turn_context.client.get_model_context_window();
+                info.model_context_window = turn_context.client().get_model_context_window();
             }
 
             state.set_token_info(Some(info));
@@ -1330,7 +1486,7 @@ impl Session {
     }
 
     pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {
-        let context_window = turn_context.client.get_model_context_window();
+        let context_window = turn_context.client().get_model_context_window();
         if let Some(context_window) = context_window {
             {
                 let mut state = self.state.lock().await;
@@ -1701,7 +1857,7 @@ mod handlers {
 
         let current_context = sess.new_turn_with_sub_id(sub_id, updates).await;
         current_context
-            .client
+            .client()
             .get_otel_manager()
             .user_prompt(&items);
 
@@ -2038,8 +2194,9 @@ async fn spawn_review_thread(
 
     let base_instructions = REVIEW_PROMPT.to_string();
     let review_prompt = resolved.prompt.clone();
-    let provider = parent_turn_context.client.get_provider();
-    let auth_manager = parent_turn_context.client.get_auth_manager();
+    let parent_client = parent_turn_context.client();
+    let provider = parent_client.get_provider();
+    let auth_manager = parent_client.get_auth_manager();
     let model_family = review_model_family.clone();
 
     // Build per‑turn client with the requested model/family.
@@ -2048,7 +2205,7 @@ async fn spawn_review_thread(
     per_turn_config.model_reasoning_summary = ReasoningSummaryConfig::Detailed;
     per_turn_config.features = review_features.clone();
 
-    let otel_manager = parent_turn_context.client.get_otel_manager().with_model(
+    let otel_manager = parent_client.get_otel_manager().with_model(
         config.review_model.as_str(),
         review_model_family.slug.as_str(),
     );
@@ -2063,26 +2220,29 @@ async fn spawn_review_thread(
         per_turn_config.model_reasoning_effort,
         per_turn_config.model_reasoning_summary,
         sess.conversation_id,
-        parent_turn_context.client.get_session_source(),
+        parent_client.get_session_source(),
     );
 
+    let turn_state = TurnContextState {
+        client,
+        cwd: parent_turn_context.cwd(),
+        approval_policy: parent_turn_context.approval_policy(),
+        sandbox_policy: parent_turn_context.sandbox_policy(),
+        tools_config,
+        codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
+        truncation_policy: TruncationPolicy::new(&per_turn_config, model_family.truncation_policy),
+    };
     let review_turn_context = TurnContext {
         sub_id: sub_id.to_string(),
-        client,
-        tools_config,
+        state: Arc::new(StdRwLock::new(turn_state)),
         developer_instructions: None,
         user_instructions: None,
         base_instructions: Some(base_instructions.clone()),
         compact_prompt: parent_turn_context.compact_prompt.clone(),
-        approval_policy: parent_turn_context.approval_policy,
-        sandbox_policy: parent_turn_context.sandbox_policy.clone(),
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
-        cwd: parent_turn_context.cwd.clone(),
         final_output_json_schema: None,
-        codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         exec_policy: parent_turn_context.exec_policy.clone(),
-        truncation_policy: TruncationPolicy::new(&per_turn_config, model_family.truncation_policy),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2146,8 +2306,9 @@ pub(crate) async fn run_task(
     if input.is_empty() {
         return None;
     }
+    let model_context_window = turn_context.client().get_model_context_window();
     let event = EventMsg::TaskStarted(TaskStartedEvent {
-        model_context_window: turn_context.client.get_model_context_window(),
+        model_context_window,
     });
     sess.send_event(&turn_context, event).await;
 
@@ -2229,7 +2390,7 @@ pub(crate) async fn run_task(
                     last_agent_message: turn_last_agent_message,
                 } = turn_output;
                 let limit = turn_context
-                    .client
+                    .client()
                     .get_model_family()
                     .auto_compact_token_limit()
                     .unwrap_or(i64::MAX);
@@ -2240,7 +2401,7 @@ pub(crate) async fn run_task(
                 if token_limit_reached {
                     if should_use_remote_compact_task(
                         sess.as_ref(),
-                        &turn_context.client.get_provider(),
+                        &turn_context.client().get_provider(),
                     ) {
                         run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone())
                             .await;
@@ -2256,7 +2417,7 @@ pub(crate) async fn run_task(
                         .notify(&UserNotification::AgentTurnComplete {
                             thread_id: sess.conversation_id.to_string(),
                             turn_id: turn_context.sub_id.clone(),
-                            cwd: turn_context.cwd.display().to_string(),
+                            cwd: turn_context.cwd().display().to_string(),
                             input_messages: turn_input_messages,
                             last_assistant_message: last_agent_message.clone(),
                         });
@@ -2292,8 +2453,8 @@ pub(crate) async fn run_task(
     skip_all,
     fields(
         turn_id = %turn_context.sub_id,
-        model = %turn_context.client.get_model(),
-        cwd = %turn_context.cwd.display()
+        model = %turn_context.client().get_model(),
+        cwd = %turn_context.cwd().display()
     )
 )]
 async fn run_turn(
@@ -2311,8 +2472,9 @@ async fn run_turn(
         .list_all_tools()
         .or_cancel(&cancellation_token)
         .await?;
+    let tools_config = turn_context.tools_config();
     let router = Arc::new(ToolRouter::from_config(
-        &turn_context.tools_config,
+        &tools_config,
         Some(
             mcp_tools
                 .into_iter()
@@ -2322,7 +2484,7 @@ async fn run_turn(
     ));
 
     let model_supports_parallel = turn_context
-        .client
+        .client()
         .get_model_family()
         .supports_parallel_tool_calls;
 
@@ -2372,7 +2534,7 @@ async fn run_turn(
             Err(e @ CodexErr::RefreshTokenFailed(_)) => return Err(e),
             Err(e) => {
                 // Use the configured provider-specific stream retry budget.
-                let max_retries = turn_context.client.get_provider().stream_max_retries();
+                let max_retries = turn_context.client().get_provider().stream_max_retries();
                 if retries < max_retries {
                     retries += 1;
                     let delay = match e {
@@ -2432,7 +2594,7 @@ async fn drain_in_flight(
     skip_all,
     fields(
         turn_id = %turn_context.sub_id,
-        model = %turn_context.client.get_model()
+        model = %turn_context.client().get_model()
     )
 )]
 async fn try_run_turn(
@@ -2443,18 +2605,20 @@ async fn try_run_turn(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    let client = turn_context.client();
+    let approval_policy = turn_context.approval_policy();
+    let sandbox_policy = turn_context.sandbox_policy();
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
-        cwd: turn_context.cwd.clone(),
-        approval_policy: turn_context.approval_policy,
-        sandbox_policy: turn_context.sandbox_policy.clone(),
-        model: turn_context.client.get_model(),
-        effort: turn_context.client.get_reasoning_effort(),
-        summary: turn_context.client.get_reasoning_summary(),
+        cwd: turn_context.cwd(),
+        approval_policy,
+        sandbox_policy,
+        model: client.get_model(),
+        effort: client.get_reasoning_effort(),
+        summary: client.get_reasoning_summary(),
     });
 
     sess.persist_rollout_items(&[rollout_item]).await;
-    let mut stream = turn_context
-        .client
+    let mut stream = client
         .clone()
         .stream(prompt)
         .instrument(info_span!("stream_request"))
@@ -2671,6 +2835,7 @@ mod tests {
     use crate::tools::format_exec_output_str;
     use codex_protocol::models::FunctionCallOutputPayload;
 
+    use crate::protocol::AskForApproval;
     use crate::protocol::CompactedItem;
     use crate::protocol::CreditsSnapshot;
     use crate::protocol::InitialHistory;
@@ -2927,7 +3092,7 @@ mod tests {
         };
         let (_, turn_context) = make_session_and_context();
 
-        let out = format_exec_output_str(&exec, turn_context.truncation_policy);
+        let out = format_exec_output_str(&exec, turn_context.truncation_policy());
 
         assert_eq!(
             out,
@@ -3048,10 +3213,10 @@ mod tests {
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
             session_source: SessionSource::Exec,
         };
-        let per_turn_config = Session::build_per_turn_config(&session_configuration);
+        let per_turn_config = Arc::new(Session::build_per_turn_config(&session_configuration));
         let model_family = ModelsManager::construct_model_family_offline(
             session_configuration.model.as_str(),
-            &per_turn_config,
+            per_turn_config.as_ref(),
         );
         let otel_manager = otel_manager(
             conversation_id,
@@ -3083,7 +3248,7 @@ mod tests {
             &otel_manager,
             session_configuration.provider.clone(),
             &session_configuration,
-            per_turn_config,
+            Arc::clone(&per_turn_config),
             model_family,
             conversation_id,
             "turn_id".to_string(),
@@ -3139,10 +3304,10 @@ mod tests {
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
             session_source: SessionSource::Exec,
         };
-        let per_turn_config = Session::build_per_turn_config(&session_configuration);
+        let per_turn_config = Arc::new(Session::build_per_turn_config(&session_configuration));
         let model_family = ModelsManager::construct_model_family_offline(
             session_configuration.model.as_str(),
-            &per_turn_config,
+            per_turn_config.as_ref(),
         );
         let otel_manager = otel_manager(
             conversation_id,
@@ -3174,7 +3339,7 @@ mod tests {
             &otel_manager,
             session_configuration.provider.clone(),
             &session_configuration,
-            per_turn_config,
+            Arc::clone(&per_turn_config),
             model_family,
             conversation_id,
             "turn_id".to_string(),
@@ -3356,6 +3521,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_settings_refreshes_active_turn_context() {
+        let (sess, turn_context, _rx) = make_session_and_context_with_rx();
+        let input = vec![UserInput::Text {
+            text: "hello".to_string(),
+        }];
+        sess.spawn_task(
+            Arc::clone(&turn_context),
+            input,
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let new_model = "gpt-5.1-codex";
+        sess.update_settings(SessionSettingsUpdate {
+            model: Some(new_model.to_string()),
+            approval_policy: Some(AskForApproval::OnRequest),
+            ..Default::default()
+        })
+        .await;
+
+        assert_eq!(turn_context.client().get_model(), new_model);
+        assert_eq!(turn_context.approval_policy(), AskForApproval::OnRequest);
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    }
+
+    #[tokio::test]
     async fn fatal_tool_error_stops_turn_and_reports_error() {
         let (session, turn_context, _rx) = make_session_and_context_with_rx();
         let tools = {
@@ -3367,8 +3562,9 @@ mod tests {
                 .list_all_tools()
                 .await
         };
+        let tools_config = turn_context.tools_config();
         let router = ToolRouter::from_config(
-            &turn_context.tools_config,
+            &tools_config,
             Some(
                 tools
                     .into_iter()
@@ -3413,12 +3609,13 @@ mod tests {
     ) -> (Vec<RolloutItem>, Vec<ResponseItem>) {
         let mut rollout_items = Vec::new();
         let mut live_history = ContextManager::new();
+        let truncation_policy = turn_context.truncation_policy();
 
         let initial_context = session.build_initial_context(turn_context);
         for item in &initial_context {
             rollout_items.push(RolloutItem::ResponseItem(item.clone()));
         }
-        live_history.record_items(initial_context.iter(), turn_context.truncation_policy);
+        live_history.record_items(initial_context.iter(), truncation_policy);
 
         let user1 = ResponseItem::Message {
             id: None,
@@ -3427,7 +3624,7 @@ mod tests {
                 text: "first user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user1), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&user1), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(user1.clone()));
 
         let assistant1 = ResponseItem::Message {
@@ -3437,7 +3634,7 @@ mod tests {
                 text: "assistant reply one".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant1), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&assistant1), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(assistant1.clone()));
 
         let summary1 = "summary one";
@@ -3461,7 +3658,7 @@ mod tests {
                 text: "second user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user2), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&user2), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(user2.clone()));
 
         let assistant2 = ResponseItem::Message {
@@ -3471,7 +3668,7 @@ mod tests {
                 text: "assistant reply two".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant2), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&assistant2), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(assistant2.clone()));
 
         let summary2 = "summary two";
@@ -3495,7 +3692,7 @@ mod tests {
                 text: "third user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user3), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&user3), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(user3.clone()));
 
         let assistant3 = ResponseItem::Message {
@@ -3505,7 +3702,7 @@ mod tests {
                 text: "assistant reply three".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant3), turn_context.truncation_policy);
+        live_history.record_items(std::iter::once(&assistant3), truncation_policy);
         rollout_items.push(RolloutItem::ResponseItem(assistant3.clone()));
 
         (rollout_items, live_history.get_history())
@@ -3520,14 +3717,15 @@ mod tests {
         use crate::turn_diff_tracker::TurnDiffTracker;
         use std::collections::HashMap;
 
-        let (session, mut turn_context_raw) = make_session_and_context();
+        let (session, turn_context_raw) = make_session_and_context();
         // Ensure policy is NOT OnRequest so the early rejection path triggers
-        turn_context_raw.approval_policy = AskForApproval::OnFailure;
+        turn_context_raw.set_approval_policy(AskForApproval::OnFailure);
         let session = Arc::new(session);
         let mut turn_context = Arc::new(turn_context_raw);
 
         let timeout_ms = 1000;
         let sandbox_permissions = SandboxPermissions::RequireEscalated;
+        let cwd = turn_context.cwd();
         let params = ExecParams {
             command: if cfg!(windows) {
                 vec![
@@ -3542,7 +3740,7 @@ mod tests {
                     "echo hi".to_string(),
                 ]
             },
-            cwd: turn_context.cwd.clone(),
+            cwd: cwd.clone(),
             expiration: timeout_ms.into(),
             env: HashMap::new(),
             sandbox_permissions,
@@ -3576,7 +3774,7 @@ mod tests {
                 payload: ToolPayload::Function {
                     arguments: serde_json::json!({
                         "command": params.command.clone(),
-                        "workdir": Some(turn_context.cwd.to_string_lossy().to_string()),
+                        "workdir": Some(turn_context.cwd().to_string_lossy().to_string()),
                         "timeout_ms": params.expiration.timeout_ms(),
                         "sandbox_permissions": params.sandbox_permissions,
                         "justification": params.justification.clone(),
@@ -3592,16 +3790,14 @@ mod tests {
 
         let expected = format!(
             "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
-            policy = turn_context.approval_policy
+            policy = turn_context.approval_policy()
         );
 
         pretty_assertions::assert_eq!(output, expected);
 
         // Now retry the same command WITHOUT escalated permissions; should succeed.
         // Force DangerFullAccess to avoid platform sandbox dependencies in tests.
-        Arc::get_mut(&mut turn_context)
-            .expect("unique turn context Arc")
-            .sandbox_policy = SandboxPolicy::DangerFullAccess;
+        turn_context.set_sandbox_policy(SandboxPolicy::DangerFullAccess);
 
         let resp2 = handler
             .handle(ToolInvocation {
@@ -3613,7 +3809,7 @@ mod tests {
                 payload: ToolPayload::Function {
                     arguments: serde_json::json!({
                         "command": params2.command.clone(),
-                        "workdir": Some(turn_context.cwd.to_string_lossy().to_string()),
+                        "workdir": Some(turn_context.cwd().to_string_lossy().to_string()),
                         "timeout_ms": params2.expiration.timeout_ms(),
                         "sandbox_permissions": params2.sandbox_permissions,
                         "justification": params2.justification.clone(),
@@ -3651,8 +3847,8 @@ mod tests {
         use crate::sandboxing::SandboxPermissions;
         use crate::turn_diff_tracker::TurnDiffTracker;
 
-        let (session, mut turn_context_raw) = make_session_and_context();
-        turn_context_raw.approval_policy = AskForApproval::OnFailure;
+        let (session, turn_context_raw) = make_session_and_context();
+        turn_context_raw.set_approval_policy(AskForApproval::OnFailure);
         let session = Arc::new(session);
         let turn_context = Arc::new(turn_context_raw);
         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -3682,7 +3878,7 @@ mod tests {
 
         let expected = format!(
             "approval policy is {policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {policy:?}",
-            policy = turn_context.approval_policy
+            policy = turn_context.approval_policy()
         );
 
         pretty_assertions::assert_eq!(output, expected);

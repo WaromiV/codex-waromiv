@@ -27,7 +27,7 @@ impl SessionTask for CompactTask {
         let session = session.clone_session();
         if crate::compact::should_use_remote_compact_task(
             session.as_ref(),
-            &ctx.client.get_provider(),
+            &ctx.client().get_provider(),
         ) {
             crate::compact_remote::run_remote_compact_task(session, ctx).await
         } else {

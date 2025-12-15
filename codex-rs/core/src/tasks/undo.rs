@@ -84,7 +84,7 @@ impl SessionTask for UndoTask {
         };
 
         let commit_id = ghost_commit.id().to_string();
-        let repo_path = ctx.cwd.clone();
+        let repo_path = ctx.cwd();
         let restore_result =
             tokio::task::spawn_blocking(move || restore_ghost_commit(&repo_path, &ghost_commit))
                 .await;

@@ -76,7 +76,7 @@ async fn start_review_conversation(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<async_channel::Receiver<Event>> {
-    let config = ctx.client.config();
+    let config = ctx.client().config();
     let mut sub_agent_config = config.as_ref().clone();
     sub_agent_config.sandbox_policy = SandboxPolicy::new_read_only_policy();
     // Run with only reviewer rubric — drop outer user_instructions

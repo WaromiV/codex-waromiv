@@ -77,7 +77,7 @@ impl ToolHandler for ApplyPatchHandler {
 
         // Re-parse and verify the patch so we can compute changes and approval.
         // Avoid building temporary ExecParams/command vectors; derive directly from inputs.
-        let cwd = turn.cwd.clone();
+        let cwd = turn.cwd();
         let command = vec!["apply_patch".to_string(), patch_input.clone()];
         match codex_apply_patch::maybe_parse_apply_patch_verified(&command, &cwd) {
             codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
@@ -110,7 +110,7 @@ impl ToolHandler for ApplyPatchHandler {
                             cwd: apply.action.cwd.clone(),
                             timeout_ms: None,
                             user_explicitly_approved: apply.user_explicitly_approved_this_action,
-                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            codex_exe: turn.codex_linux_sandbox_exe(),
                         };
 
                         let mut orchestrator = ToolOrchestrator::new();
@@ -122,7 +122,7 @@ impl ToolHandler for ApplyPatchHandler {
                             tool_name: tool_name.to_string(),
                         };
                         let out = orchestrator
-                            .run(&mut runtime, &req, &tool_ctx, &turn, turn.approval_policy)
+                            .run(&mut runtime, &req, &tool_ctx, &turn, turn.approval_policy())
                             .await;
                         let event_ctx = ToolEventCtx::new(
                             session.as_ref(),
@@ -201,7 +201,7 @@ pub(crate) async fn intercept_apply_patch(
                         cwd: apply.action.cwd.clone(),
                         timeout_ms,
                         user_explicitly_approved: apply.user_explicitly_approved_this_action,
-                        codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                        codex_exe: turn.codex_linux_sandbox_exe(),
                     };
 
                     let mut orchestrator = ToolOrchestrator::new();
@@ -213,7 +213,7 @@ pub(crate) async fn intercept_apply_patch(
                         tool_name: tool_name.to_string(),
                     };
                     let out = orchestrator
-                        .run(&mut runtime, &req, &tool_ctx, turn, turn.approval_policy)
+                        .run(&mut runtime, &req, &tool_ctx, turn, turn.approval_policy())
                         .await;
                     let event_ctx =
                         ToolEventCtx::new(session, turn, call_id, tracker.as_ref().copied());

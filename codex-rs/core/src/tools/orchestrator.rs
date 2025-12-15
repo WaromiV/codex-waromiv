@@ -42,7 +42,10 @@ impl ToolOrchestrator {
     where
         T: ToolRuntime<Rq, Out>,
     {
-        let otel = turn_ctx.client.get_otel_manager();
+        let sandbox_policy = turn_ctx.sandbox_policy();
+        let cwd = turn_ctx.cwd();
+        let codex_linux_sandbox_exe = turn_ctx.codex_linux_sandbox_exe();
+        let otel = turn_ctx.client().get_otel_manager();
         let otel_tn = &tool_ctx.tool_name;
         let otel_ci = &tool_ctx.call_id;
         let otel_user = codex_otel::otel_manager::ToolDecisionSource::User;
@@ -51,9 +54,9 @@ impl ToolOrchestrator {
         // 1) Approval
         let mut already_approved = false;
 
-        let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
-            default_exec_approval_requirement(approval_policy, &turn_ctx.sandbox_policy)
-        });
+        let requirement = tool
+            .exec_approval_requirement(req)
+            .unwrap_or_else(|| default_exec_approval_requirement(approval_policy, &sandbox_policy));
         match requirement {
             ExecApprovalRequirement::Skip { .. } => {
                 otel.tool_decision(otel_tn, otel_ci, &ReviewDecision::Approved, otel_cfg);
@@ -89,17 +92,17 @@ impl ToolOrchestrator {
             SandboxOverride::BypassSandboxFirstAttempt => crate::exec::SandboxType::None,
             SandboxOverride::NoOverride => self
                 .sandbox
-                .select_initial(&turn_ctx.sandbox_policy, tool.sandbox_preference()),
+                .select_initial(&sandbox_policy, tool.sandbox_preference()),
         };
 
         // Platform-specific flag gating is handled by SandboxManager::select_initial
         // via crate::safety::get_platform_sandbox().
         let initial_attempt = SandboxAttempt {
             sandbox: initial_sandbox,
-            policy: &turn_ctx.sandbox_policy,
+            policy: &sandbox_policy,
             manager: &self.sandbox,
-            sandbox_cwd: &turn_ctx.cwd,
-            codex_linux_sandbox_exe: turn_ctx.codex_linux_sandbox_exe.as_ref(),
+            sandbox_cwd: &cwd,
+            codex_linux_sandbox_exe: codex_linux_sandbox_exe.as_ref(),
         };
 
         match tool.run(req, &initial_attempt, tool_ctx).await {
@@ -146,9 +149,9 @@ impl ToolOrchestrator {
 
                 let escalated_attempt = SandboxAttempt {
                     sandbox: crate::exec::SandboxType::None,
-                    policy: &turn_ctx.sandbox_policy,
+                    policy: &sandbox_policy,
                     manager: &self.sandbox,
-                    sandbox_cwd: &turn_ctx.cwd,
+                    sandbox_cwd: &cwd,
                     codex_linux_sandbox_exe: None,
                 };
 

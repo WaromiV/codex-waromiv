@@ -96,18 +96,18 @@ impl EnvironmentContext {
     }
 
     pub fn diff(before: &TurnContext, after: &TurnContext, shell: &Shell) -> Self {
-        let cwd = if before.cwd != after.cwd {
-            Some(after.cwd.clone())
+        let cwd = if before.cwd() != after.cwd() {
+            Some(after.cwd())
         } else {
             None
         };
-        let approval_policy = if before.approval_policy != after.approval_policy {
-            Some(after.approval_policy)
+        let approval_policy = if before.approval_policy() != after.approval_policy() {
+            Some(after.approval_policy())
         } else {
             None
         };
-        let sandbox_policy = if before.sandbox_policy != after.sandbox_policy {
-            Some(after.sandbox_policy.clone())
+        let sandbox_policy = if before.sandbox_policy() != after.sandbox_policy() {
+            Some(after.sandbox_policy())
         } else {
             None
         };
@@ -116,9 +116,9 @@ impl EnvironmentContext {
 
     pub fn from_turn_context(turn_context: &TurnContext, shell: &Shell) -> Self {
         Self::new(
-            Some(turn_context.cwd.clone()),
-            Some(turn_context.approval_policy),
-            Some(turn_context.sandbox_policy.clone()),
+            Some(turn_context.cwd()),
+            Some(turn_context.approval_policy()),
+            Some(turn_context.sandbox_policy()),
             shell.clone(),
         )
     }
