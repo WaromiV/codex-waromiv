@@ -2316,7 +2316,7 @@ pub(crate) async fn run_task(
         Some(
             sess.services
                 .skills_manager
-                .skills_for_cwd(&turn_context.cwd),
+                .skills_for_cwd(&turn_context.cwd()),
         )
     } else {
         None
